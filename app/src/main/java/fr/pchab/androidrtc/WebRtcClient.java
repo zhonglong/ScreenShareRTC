@@ -36,15 +36,26 @@ import org.webrtc.VideoSource;
 import org.webrtc.VideoTrack;
 
 import java.net.URISyntaxException;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.util.HashMap;
 import java.util.LinkedList;
 
 
 import android.content.Context;
 
-import com.github.nkzawa.emitter.Emitter;
-import com.github.nkzawa.socketio.client.IO;
-import com.github.nkzawa.socketio.client.Socket;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+
+import io.socket.emitter.Emitter;
+import io.socket.client.IO;
+import io.socket.client.Socket;
+import okhttp3.OkHttpClient;
 
 public class WebRtcClient {
 
@@ -334,10 +345,52 @@ public class WebRtcClient {
         PeerConnectionFactory.initializeAndroidGlobals(mContext, true, true,
                 params.videoCodecHwAcceleration);
         factory = new PeerConnectionFactory();
-        String host = "http://" + context.getString(R.string.host) + ":" + context.getString(R.string.port) + "/";
+        String host = "https://" + context.getString(R.string.host) + ":" + context.getString(R.string.port) + "/";
         try {
-            mSocket = IO.socket(host);
-        } catch (URISyntaxException e) {
+            TrustManager[] trustAllCerts = new TrustManager[1];
+            TrustManager tm = new TM();
+            trustAllCerts[0] = tm;
+            SSLContext sc = SSLContext.getInstance("SSL");
+            X509TrustManager x509m = new X509TrustManager() {
+
+                @Override
+                public X509Certificate[] getAcceptedIssuers() {
+                    return new java.security.cert.X509Certificate[] {};
+                }
+
+                @Override
+                public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                }
+
+                @Override
+                public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                }
+            };
+
+            try {
+                sc.init(null, trustAllCerts, null);
+            } catch (KeyManagementException e ) {
+                e.printStackTrace();
+            }
+            OkHttpClient okHttpClient = new OkHttpClient.Builder()
+                    .hostnameVerifier(new HostnameVerifier() {
+                        @Override
+                        public boolean verify( String s, SSLSession sslSession ) {
+                            return true;
+                        }
+                    })
+                    .sslSocketFactory(sc.getSocketFactory(), x509m)
+                    .build();
+            IO.Options opts = new IO.Options();
+            opts.callFactory = okHttpClient;
+            opts.webSocketFactory = okHttpClient;
+
+            // default settings for all sockets
+            IO.setDefaultOkHttpWebSocketFactory(okHttpClient);
+            IO.setDefaultOkHttpCallFactory(okHttpClient);
+
+            mSocket = IO.socket(host, opts);
+        } catch (URISyntaxException | NoSuchAlgorithmException e) {
             e.printStackTrace();
         }
         mSocket.on("id", messageHandler.onId);
@@ -434,5 +487,27 @@ public class WebRtcClient {
         mListener.onStatusChanged("STREAMING");
     }
 
+    static class TM implements TrustManager, X509TrustManager {
+        public X509Certificate[] getAcceptedIssuers() {
+            return null;
+        }
 
+        public boolean isServerTrusted(X509Certificate[] certs) {
+            return true;
+        }
+
+        public boolean isClientTrusted(X509Certificate[] certs) {
+            return true;
+        }
+
+        public void checkServerTrusted(X509Certificate[] certs, String authType)
+                throws CertificateException {
+            return;
+        }
+
+        public void checkClientTrusted(X509Certificate[] certs, String authType)
+                throws CertificateException {
+            return;
+        }
+    }
 }
