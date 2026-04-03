@@ -16,8 +16,8 @@
 
 package fr.pchab.androidrtc;
 
+import android.content.Context;
 import android.util.Log;
-
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -35,27 +35,8 @@ import org.webrtc.VideoCapturer;
 import org.webrtc.VideoSource;
 import org.webrtc.VideoTrack;
 
-import java.net.URISyntaxException;
-import java.security.KeyManagementException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.CertificateException;
-import java.security.cert.X509Certificate;
 import java.util.HashMap;
 import java.util.LinkedList;
-
-
-import android.content.Context;
-
-import javax.net.ssl.HostnameVerifier;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSession;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
-
-import io.socket.emitter.Emitter;
-import io.socket.client.IO;
-import io.socket.client.Socket;
-import okhttp3.OkHttpClient;
 
 public class WebRtcClient {
 
@@ -71,7 +52,6 @@ public class WebRtcClient {
     private MediaStream mLocalMediaStream;
     private VideoSource mVideoSource;
     private RtcListener mListener;
-    private Socket mSocket;
     VideoCapturer videoCapturer;
     MessageHandler messageHandler = new MessageHandler();
     Context mContext;
@@ -98,20 +78,6 @@ public class WebRtcClient {
             Log.d(TAG, "CreateOfferCommand");
             Peer peer = peers.get(peerId);
             peer.pc.createOffer(peer, mPeerConnConstraints);
-//            sendMessage("r0Z049NKJF2ZCIhRAAAZ","offer",new JSONObject());
-        }
-    }
-
-    public class CreateAnswerCommand implements Command {
-        public void execute(String peerId, JSONObject payload) throws JSONException {
-            Log.d(TAG, "CreateAnswerCommand");
-            Peer peer = peers.get(peerId);
-            SessionDescription sdp = new SessionDescription(
-                    SessionDescription.Type.fromCanonicalForm(payload.optString("type")),
-                    payload.optString("sdp")
-            );
-            peer.pc.setRemoteDescription(peer, sdp);
-            peer.pc.createAnswer(peer, mPeerConnConstraints);
         }
     }
 
@@ -128,13 +94,14 @@ public class WebRtcClient {
     }
 
     public class AddIceCandidateCommand implements Command {
+        int mLineIndex = 1;
         public void execute(String peerId, JSONObject payload) throws JSONException {
             Log.d(TAG, "AddIceCandidateCommand");
             PeerConnection pc = peers.get(peerId).pc;
             if (pc.getRemoteDescription() != null) {
                 IceCandidate candidate = new IceCandidate(
-                        payload.optString("id"),
-                        payload.optInt("label"),
+                        payload.optString("mid"),
+                        mLineIndex++,
                         payload.optString("candidate")
                 );
                 pc.addIceCandidate(candidate);
@@ -150,13 +117,11 @@ public class WebRtcClient {
      * @param payload payload of message
      * @throws JSONException
      */
-    public void sendMessage(String to, String type, JSONObject payload) throws JSONException {
-        JSONObject message = new JSONObject();
-        message.put("to", to);
+    public void sendMessage(String to, String type, JSONObject message) throws JSONException {
+        message.put("remote_user_id", to);
         message.put("type", type);
-        message.put("payload", payload);
-        mSocket.emit("message", message);
-        Log.d(TAG, "socket send " + type + " to " + to + " payload:" + payload);
+        mListener.onCall(message.toString());
+        Log.d(TAG, "socket send " + type + " to " + to + " payload:" + message);
     }
 
     public class MessageHandler {
@@ -164,26 +129,15 @@ public class WebRtcClient {
 
         public MessageHandler() {
             this.commandMap = new HashMap<>();
-            commandMap.put("init", new CreateOfferCommand());
-            commandMap.put("offer", new CreateAnswerCommand());
+            commandMap.put("user_join_transmission", new CreateOfferCommand());
             commandMap.put("answer", new SetRemoteSDPCommand());
             commandMap.put("candidate", new AddIceCandidateCommand());
         }
 
-        public Emitter.Listener onMessage = new Emitter.Listener() {
-            @Override
-            public void call(Object... args) {
+            public void call(String from, JSONObject payload) {
                 try {
-                    JSONObject data = (JSONObject) args[0];
-//                    String info = (String) args[0];
-//                    JSONObject data = new JSONObject(info);
-                    String from = data.optString("from");
-                    String type = data.optString("type");
+                    String type = payload.optString("type");
                     Log.d(TAG, "socket received " + type + " from " + from);
-                    JSONObject payload = null;
-                    if (!type.equals("init")) {
-                        payload = data.optJSONObject("payload");
-                    }
                     // if peer is unknown, try to add him
                     if (!peers.containsKey(from)) {
                         // if MAX_PEER is reach, ignore the call
@@ -203,17 +157,6 @@ public class WebRtcClient {
                     e.printStackTrace();
                 }
             }
-        };
-
-        public Emitter.Listener onId = new Emitter.Listener() {
-            @Override
-            public void call(Object... args) {
-                String id = (String) args[0];
-                mListener.onReady(id);
-                mListener.onStatusChanged("READY");
-                Log.d(TAG, "socket onId " + id);
-            }
-        };
     }
 
     public class Peer implements SdpObserver, PeerConnection.Observer {
@@ -226,7 +169,6 @@ public class WebRtcClient {
             // TODO: modify sdp to use mPeerConnParams prefered codecs
             try {
                 JSONObject payload = new JSONObject();
-                payload.put("type", sdp.type.canonicalForm());
                 payload.put("sdp", sdp.description);
                 Log.d(TAG, "onCreateSuccess");
                 sendMessage(id, sdp.type.canonicalForm(), payload);
@@ -281,10 +223,9 @@ public class WebRtcClient {
         public void onIceCandidate(final IceCandidate candidate) {
             try {
                 JSONObject payload = new JSONObject();
-                payload.put("label", candidate.sdpMLineIndex);
-                payload.put("id", candidate.sdpMid);
+                payload.put("mid", candidate.sdpMid);
                 payload.put("candidate", candidate.sdp);
-                sendMessage(id, "candidate", payload);
+                sendMessage(id, "new_candidate_mid", payload);
             } catch (JSONException e) {
                 e.printStackTrace();
             }
@@ -342,85 +283,17 @@ public class WebRtcClient {
         mListener = listener;
         mPeerConnParams = params;
         videoCapturer = capturer;
-        PeerConnectionFactory.initializeAndroidGlobals(mContext, true, true,
+        PeerConnectionFactory.initializeAndroidGlobals(mContext, false, true,
                 params.videoCodecHwAcceleration);
         factory = new PeerConnectionFactory();
-        String host = "https://" + context.getString(R.string.host) + ":" + context.getString(R.string.port) + "/";
-        try {
-            TrustManager[] trustAllCerts = new TrustManager[1];
-            TrustManager tm = new TM();
-            trustAllCerts[0] = tm;
-            SSLContext sc = SSLContext.getInstance("SSL");
-            X509TrustManager x509m = new X509TrustManager() {
 
-                @Override
-                public X509Certificate[] getAcceptedIssuers() {
-                    return new java.security.cert.X509Certificate[] {};
-                }
+        iceServers.add(new PeerConnection.IceServer("stun:rdturn.tpv-tech.com:3478"));
+//        iceServers.add(new PeerConnection.IceServer("turn:rdturn.tpv-tech.com:3478"));
+        iceServers.add(new PeerConnection.IceServer("stun:rdturn.tpv-tech.com:5349", "aiteam", "1EPhkTamu8X"));
+        iceServers.add(new PeerConnection.IceServer("turn:rdturn.tpv-tech.com:5349", "aiteam", "1EPhkTamu8X"));
 
-                @Override
-                public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-                }
-
-                @Override
-                public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-                }
-            };
-
-            try {
-                sc.init(null, trustAllCerts, null);
-            } catch (KeyManagementException e ) {
-                e.printStackTrace();
-            }
-            OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                    .hostnameVerifier(new HostnameVerifier() {
-                        @Override
-                        public boolean verify( String s, SSLSession sslSession ) {
-                            return true;
-                        }
-                    })
-                    .sslSocketFactory(sc.getSocketFactory(), x509m)
-                    .build();
-            IO.Options opts = new IO.Options();
-            opts.callFactory = okHttpClient;
-            opts.webSocketFactory = okHttpClient;
-
-            // default settings for all sockets
-            IO.setDefaultOkHttpWebSocketFactory(okHttpClient);
-            IO.setDefaultOkHttpCallFactory(okHttpClient);
-
-            mSocket = IO.socket(host, opts);
-        } catch (URISyntaxException | NoSuchAlgorithmException e) {
-            e.printStackTrace();
-        }
-        mSocket.on("id", messageHandler.onId);
-        mSocket.on("message", messageHandler.onMessage);
-        mSocket.on(Socket.EVENT_CONNECT, new Emitter.Listener() {
-            @Override
-            public void call(Object... args) {
-                Log.d(TAG, "socket state connect");
-            }
-        });
-        mSocket.on(Socket.EVENT_DISCONNECT, new Emitter.Listener() {
-            @Override
-            public void call(Object... args) {
-                Log.d(TAG, "socket state disconnect");
-            }
-        });
-        mSocket.on(Socket.EVENT_ERROR, new Emitter.Listener() {
-            @Override
-            public void call(Object... args) {
-                Log.d(TAG, "socket state error");
-            }
-        });
-        mSocket.connect();
-        Log.d(TAG, "socket start connect");
-
-        iceServers.add(new PeerConnection.IceServer("stun:23.21.150.121"));
-        iceServers.add(new PeerConnection.IceServer("stun:stun.l.google.com:19302"));
-
-        mPeerConnConstraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"));
-        mPeerConnConstraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"));
+//        mPeerConnConstraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"));
+//        mPeerConnConstraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"));
         mPeerConnConstraints.optional.add(new MediaConstraints.KeyValuePair("DtlsSrtpKeyAgreement", "true"));
     }
 
@@ -443,8 +316,7 @@ public class WebRtcClient {
     }
 
     private int findEndPoint() {
-        for (int i = 0; i < MAX_PEER; i++) if (!endPoints[i]) return i;
-        return MAX_PEER;
+        return 0;
     }
 
     /**
@@ -457,13 +329,6 @@ public class WebRtcClient {
      */
     public void start(String name) {
         initScreenCapturStream();
-        try {
-            JSONObject message = new JSONObject();
-            message.put("name", name);
-            mSocket.emit("readyToStream", message);
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
     }
 
     private void initScreenCapturStream() {
@@ -480,34 +345,14 @@ public class WebRtcClient {
         VideoTrack localVideoTrack = factory.createVideoTrack(VIDEO_TRACK_ID, mVideoSource);
         localVideoTrack.setEnabled(true);
         mLocalMediaStream.addTrack(factory.createVideoTrack("ARDAMSv0", mVideoSource));
-        AudioSource audioSource = factory.createAudioSource(new MediaConstraints());
-        mLocalMediaStream.addTrack(factory.createAudioTrack("ARDAMSa0", audioSource));
+//        AudioSource audioSource = factory.createAudioSource(new MediaConstraints());
+//        mLocalMediaStream.addTrack(factory.createAudioTrack("ARDAMSa0", audioSource));
 //        mLocalMediaStream.videoTracks.get(0).addRenderer(new VideoRenderer(mLocalRender));
 //        mListener.onLocalStream(mLocalMediaStream);
         mListener.onStatusChanged("STREAMING");
     }
 
-    static class TM implements TrustManager, X509TrustManager {
-        public X509Certificate[] getAcceptedIssuers() {
-            return null;
-        }
-
-        public boolean isServerTrusted(X509Certificate[] certs) {
-            return true;
-        }
-
-        public boolean isClientTrusted(X509Certificate[] certs) {
-            return true;
-        }
-
-        public void checkServerTrusted(X509Certificate[] certs, String authType)
-                throws CertificateException {
-            return;
-        }
-
-        public void checkClientTrusted(X509Certificate[] certs, String authType)
-                throws CertificateException {
-            return;
-        }
+    public void onMessage(String peerId, JSONObject payload) {
+        messageHandler.call(peerId, payload);
     }
 }
